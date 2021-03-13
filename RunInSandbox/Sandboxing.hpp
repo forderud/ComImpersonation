@@ -274,6 +274,24 @@ public:
         Based on https://docs.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-geteffectiverightsfromacla */
     class Check {
     public:
+        Check() : m_autz_mgr(nullptr, nullptr), m_autz_client_ctx(nullptr, nullptr) {
+            Initialize();
+
+            HandleWrap token;
+            BOOL ok = OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &token);
+            if (!ok)
+                throw std::runtime_error("OpenProcessToken failed");
+
+            {
+                AUTHZ_CLIENT_CONTEXT_HANDLE tmp_ctx = nullptr;
+                ok = AuthzInitializeContextFromToken(0, token, m_autz_mgr.get(), NULL, {}, NULL, &tmp_ctx);
+                if (!ok)
+                    throw std::runtime_error("AuthzInitializeContextFromToken failure");
+
+                m_autz_client_ctx = { tmp_ctx, AuthzFreeContext };
+            }
+        }
+
         Check (const wchar_t * identity_sid) : m_autz_mgr(nullptr, nullptr), m_autz_client_ctx(nullptr, nullptr) {
             Initialize();
 
@@ -331,8 +349,11 @@ public:
 
                 // perform access check
                 BOOL ok = AuthzAccessCheck(0, m_autz_client_ctx.get(), &AccessRequest, NULL, sd, NULL, 0, &AccessReply, NULL);
-                if (!ok)
+                if (!ok) {
+                    DWORD err = GetLastError();
+                    err;
                     return 0;
+                }
             }
 
             return GrantedAccess;

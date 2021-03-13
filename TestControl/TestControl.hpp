@@ -27,7 +27,7 @@ public:
 
     HRESULT STDMETHODCALLTYPE TestCallback(IUnknown * obj) override;
 
-    HRESULT STDMETHODCALLTYPE MoveMouseCursor(int x_pos, int y_pos) override;
+    HRESULT STDMETHODCALLTYPE MoveMouseCursor(int x_pos, int y_pos, /*out*/DWORD * access) override;
 
     DECLARE_REGISTRY_RESOURCEID(IDR_TestControl)
 
