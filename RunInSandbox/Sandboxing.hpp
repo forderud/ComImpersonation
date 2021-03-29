@@ -274,22 +274,42 @@ public:
         Based on https://docs.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-geteffectiverightsfromacla */
     class Check {
     public:
-        Check (const wchar_t * identity_sid) : m_autz_mgr(nullptr, nullptr), m_autz_client_ctx(nullptr, nullptr) {
-            Initialize();
-
+        Check (const wchar_t * identity_sid) {
             SidWrap identity_sid_bin;
             BOOL ok = ConvertStringSidToSid(identity_sid, &identity_sid_bin);
             if (!ok)
                 throw std::runtime_error("ConvertStringSidToSid failure");
 
-            {
-                AUTHZ_CLIENT_CONTEXT_HANDLE tmp_ctx = nullptr;
-                ok = AuthzInitializeContextFromSid(0, identity_sid_bin, m_autz_mgr.get(), NULL, {}, NULL, &tmp_ctx);
-                if (!ok)
-                    throw std::runtime_error("AuthzInitializeContextFromSid failure");
+            HandleWrap cur_token;
+            WIN32_CHECK(OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &cur_token));
 
-                m_autz_client_ctx = {tmp_ctx, AuthzFreeContext};
-            }
+            HandleWrap imp_token;
+            WIN32_CHECK(DuplicateTokenEx(cur_token, 0, NULL, SecurityImpersonation, TokenImpersonation, &imp_token));
+#if 0
+            // TODO: Replace identity with SID
+            std::vector<BYTE> buffer(1024, 0);
+            DWORD buffer_len = (DWORD)buffer.size();
+            WIN32_CHECK(GetTokenInformation(m_token, TokenUser, buffer.data(), buffer_len, &buffer_len));
+            buffer.resize(buffer_len);
+            TOKEN_USER* user = (TOKEN_USER*)buffer.data();
+
+            DWORD header_len = (DWORD)sizeof(TOKEN_USER);
+            DWORD prv_sid_len = GetLengthSid(user->User.Sid);
+            assert(buffer_len == header_len + prv_sid_len);
+            DWORD new_sid_len = GetLengthSid(identity_sid_bin);
+            user->User.Sid = identity_sid_bin; // try to replace user SID
+            WIN32_CHECK(SetTokenInformation(m_token, TokenUser, user, header_len + new_sid_len));
+#endif
+
+            // restrict impersonation token (doesn't work)
+            SID_AND_ATTRIBUTES restrict_sid[2] = {};
+            SID_IDENTIFIER_AUTHORITY SIDAuth = SECURITY_NT_AUTHORITY;
+            AllocateAndInitializeSid(&SIDAuth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &restrict_sid[0].Sid);
+            restrict_sid[1].Attributes = 0;
+            restrict_sid[1].Sid = identity_sid_bin;
+
+            DWORD flags = 0; //DISABLE_MAX_PRIVILEGE;
+            WIN32_CHECK(CreateRestrictedToken(imp_token, flags, 0, nullptr/*deny-SIDs*/, 0, nullptr/*delete-LUIDs*/, (DWORD)std::size(restrict_sid), restrict_sid, &m_token));
         }
 
         ~Check() {
@@ -314,28 +334,17 @@ public:
         }
 
         ACCESS_MASK TryAccess(PSECURITY_DESCRIPTOR sd) {
-            ACCESS_MASK GrantedAccess = 0;
-            DWORD       Error = 0;
+            DWORD access_mask = 0;
+            BOOL  access_granted = FALSE;
             {
-                AUTHZ_ACCESS_REQUEST AccessRequest = {};
-                AccessRequest.DesiredAccess = MAXIMUM_ALLOWED;
-                AccessRequest.PrincipalSelfSid = NULL;
-                AccessRequest.ObjectTypeList = NULL;
-                AccessRequest.ObjectTypeListLength = 0;
-                AccessRequest.OptionalArguments = NULL;
-
-                AUTHZ_ACCESS_REPLY AccessReply = {};
-                AccessReply.ResultListLength = 1;
-                AccessReply.GrantedAccessMask = &GrantedAccess; // [size_is(ResultListLength)]
-                AccessReply.Error             = &Error;         // [size_is(ResultListLength)]
-
                 // perform access check
-                BOOL ok = AuthzAccessCheck(0, m_autz_client_ctx.get(), &AccessRequest, NULL, sd, NULL, 0, &AccessReply, NULL);
-                if (!ok)
-                    return 0;
+                GENERIC_MAPPING generic_mapping = {};
+                PRIVILEGE_SET PrivSet = {};
+                DWORD PrivSetSize = sizeof(PrivSet);
+                WIN32_CHECK(AccessCheck(sd, m_token, MAXIMUM_ALLOWED, &generic_mapping,  &PrivSet, &PrivSetSize, &access_mask, &access_granted));
             }
 
-            return GrantedAccess;
+            return access_mask;
         }
 
         /** Based on https://docs.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-geteffectiverightsfromacla */
@@ -354,16 +363,7 @@ public:
         }
 
     private:
-        void Initialize() {
-            AUTHZ_RESOURCE_MANAGER_HANDLE mgr_tmp = nullptr;
-            BOOL ok = AuthzInitializeResourceManager(AUTHZ_RM_FLAG_NO_AUDIT, NULL, NULL, NULL, NULL, &mgr_tmp);
-            if (!ok)
-                abort(); // should never happen
-            m_autz_mgr = { mgr_tmp, AuthzFreeResourceManager };
-        }
-
-        std::unique_ptr<std::remove_pointer<AUTHZ_RESOURCE_MANAGER_HANDLE>::type, decltype(&AuthzFreeResourceManager)> m_autz_mgr;
-        std::unique_ptr<std::remove_pointer<AUTHZ_CLIENT_CONTEXT_HANDLE>::type, decltype(&AuthzFreeContext)>           m_autz_client_ctx;
+        HandleWrap m_token;
     };
 
     /** Tag a folder path as writable by low integrity level (IL) processes.
