@@ -500,14 +500,23 @@ struct ImpersonateThread {
         {
             // current user
             HandleWrap cur_token;
-            WIN32_CHECK(OpenProcessToken(proc, TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &cur_token));
-            WIN32_CHECK(DuplicateTokenEx(cur_token, 0, NULL, SecurityImpersonation, TokenPrimary, &m_token));
+            WIN32_CHECK(OpenProcessToken(proc, TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &m_token));
+            //WIN32_CHECK(DuplicateTokenEx(cur_token, 0, NULL, SecurityImpersonation, TokenPrimary, &m_token));
         }
 
-        if (integrity != IntegrityLevel::Default)
-            ApplyIntegrity(integrity);
+        TOKEN_LINKED_TOKEN tlt = {};
+        DWORD tlt_len = 0;
+        WIN32_CHECK(GetTokenInformation(m_token, TokenLinkedToken, &tlt, sizeof(tlt), &tlt_len));
 
-        WIN32_CHECK(ImpersonateLoggedOnUser(m_token)); // change current thread integrity
+        TOKEN_ELEVATION elevation = {};
+        DWORD ret_len = 0;
+        if (!GetTokenInformation(tlt.LinkedToken, TokenElevation, &elevation, sizeof(elevation), &ret_len))
+            abort();
+        assert(elevation.TokenIsElevated == 0);
+
+        WIN32_CHECK(ImpersonateLoggedOnUser(tlt.LinkedToken)); // change current thread integrity
+
+        //CloseHandle(tlt.LinkedToken);
     }
 
     ImpersonateThread(HandleWrap & handle) {
